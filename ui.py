@@ -1,104 +1,123 @@
 import streamlit as st
 import pandas as pd
 import pickle
-import pyshark
-import time
 import matplotlib.pyplot as plt
+import shap
 
-# Load model + scaler
+st.set_page_config(page_title="MITM Detection System", layout="centered")
+
+st.title("🔐 MITM Attack Detection System")
+
+
 model = pickle.load(open("model.pkl", "rb"))
 scaler = pickle.load(open("scaler.pkl", "rb"))
 
-st.title("🔐 MITM Attack Detection Dashboard")
+@st.cache_resource
+def load_explainer(_model):
+    return shap.TreeExplainer(_model)
 
-# -------------------------------
-# SECTION 1 — Manual Prediction
-# -------------------------------
-st.header("Manual Packet Check")
+explainer = load_explainer(model)
 
-packet_size = st.number_input("Packet Size", min_value=0)
-src_port = st.number_input("Source Port", min_value=0)
-dst_port = st.number_input("Destination Port", min_value=0)
-protocol = st.number_input("Protocol (6 = TCP)", min_value=0)
 
-if st.button("Check Traffic"):
+if "safe" not in st.session_state:
+    st.session_state.safe = 0
+if "attack" not in st.session_state:
+    st.session_state.attack = 0
+
+
+st.subheader("🧪 Enter Packet Details")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    packet_size = st.number_input("Packet Size", min_value=1, value=100)
+    src_port = st.number_input("Source Port", min_value=1, value=50000)
+
+with col2:
+    dst_port = st.number_input("Destination Port (Server Port)", min_value=1, value=5000)
+    protocol = st.selectbox("Protocol", [6], format_func=lambda x: "TCP (6)")
+
+
+if st.button("Analyze Traffic"):
+
     data = pd.DataFrame(
         [[packet_size, src_port, dst_port, protocol]],
         columns=['packet_size','src_port','dst_port','protocol']
     )
 
+    
     data_scaled = scaler.transform(data)
-    prediction = model.predict(data_scaled)
 
-    if prediction[0] == 1:
-        st.error("🚨 ATTACK DETECTED")
+    
+    prediction = model.predict(data_scaled)[0]
+
+    
+    if prediction == 1:
+        st.session_state.attack += 1
+        st.error("🚨 Suspicious Traffic Detected")
     else:
-        st.success("✅ SAFE TRAFFIC")
+        st.session_state.safe += 1
+        st.success("✅ Normal Traffic")
 
+    
+    st.subheader("🔬 Explanation (Why this decision?)")
 
-# -------------------------------
-# SECTION 2 — Real-Time Detection
-# -------------------------------
-st.header("Real-Time Packet Detection")
+    shap_values = explainer.shap_values(data_scaled)
 
-run_capture = st.checkbox("Start Real-Time Detection")
+    if isinstance(shap_values, list):
+        shap_vals = shap_values[1][0]
+    else:
+        shap_vals = shap_values[0]
 
-attack_count = 0
-safe_count = 0
+    features = ['packet_size','src_port','dst_port','protocol']
 
-if run_capture:
-    st.warning("Running live capture...")
+    explanation = pd.DataFrame({
+        "Feature": features,
+        "Impact": shap_vals
+    }).sort_values(by="Impact", key=abs, ascending=False)
 
-    capture = pyshark.LiveCapture(interface='eth0')
+    
+    st.dataframe(explanation, width='stretch')
 
-    output = st.empty()
-
-    for packet in capture.sniff_continuously(packet_count=30):
-
-        try:
-            if hasattr(packet, 'tcp'):
-                packet_size = int(packet.length)
-                src_port = int(packet.tcp.srcport)
-                dst_port = int(packet.tcp.dstport)
-                protocol = 6
-
-                data = pd.DataFrame(
-                    [[packet_size, src_port, dst_port, protocol]],
-                    columns=['packet_size','src_port','dst_port','protocol']
-                )
-
-                data_scaled = scaler.transform(data)
-                prediction = model.predict(data_scaled)
-
-                if prediction[0] == 1:
-                    attack_count += 1
-                    output.error(f"🚨 ATTACK: {src_port} → {dst_port}")
-                else:
-                    safe_count += 1
-                    output.success(f"✅ SAFE: {src_port} → {dst_port}")
-
-                time.sleep(0.2)
-
-        except:
-            continue
-
-
-# -------------------------------
-# SECTION 3 — Graph Visualization
-# -------------------------------
-st.header("Traffic Analysis")
-
-if st.button("Show Traffic Graph"):
-
-    labels = ['Safe Traffic', 'Attack Traffic']
-    values = [safe_count, attack_count]
-
+    
     fig, ax = plt.subplots()
-    ax.bar(labels, values)
-    ax.set_title("Traffic Classification")
-    ax.set_ylabel("Packet Count")
+    ax.barh(explanation["Feature"], explanation["Impact"])
+    ax.set_title("Feature Impact on Decision")
+    ax.invert_yaxis()
 
     st.pyplot(fig)
 
-    st.write(f"Safe Packets: {safe_count}")
-    st.write(f"Attack Packets: {attack_count}")
+    st.caption("Positive → Attack | Negative → Safe")
+
+st.subheader("📊 Traffic Summary")
+
+safe = st.session_state.safe
+attack = st.session_state.attack
+
+fig, ax = plt.subplots()
+ax.bar(['Normal', 'Attack'], [safe, attack])
+ax.set_title("Traffic Classification")
+
+st.pyplot(fig)
+
+st.write(f"✅ Normal: {safe}")
+st.write(f"🚨 Suspicious: {attack}")
+
+
+st.subheader("📊 Model Insight")
+
+if st.button("Show Feature Importance"):
+
+    features = ['packet_size','src_port','dst_port','protocol']
+    importance = model.feature_importances_
+
+    fig, ax = plt.subplots()
+    ax.barh(features, importance)
+    ax.set_title("Feature Importance")
+
+    st.pyplot(fig)
+
+
+if st.button("Reset"):
+    st.session_state.safe = 0
+    st.session_state.attack = 0
