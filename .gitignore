@@ -1,6 +1,4 @@
-venv/
+*.log
+env/
 __pycache__/
-*.pyc
-*.pkl
-*.pcapng
-*.csv
+*.pcap
