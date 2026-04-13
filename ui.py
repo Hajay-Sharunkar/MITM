@@ -2,122 +2,100 @@ import streamlit as st
 import pandas as pd
 import pickle
 import matplotlib.pyplot as plt
-import shap
+from sklearn.metrics import roc_curve, auc
+import os
 
-st.set_page_config(page_title="MITM Detection System", layout="centered")
+# -------------------------------
+# CONFIG
+# -------------------------------
+st.set_page_config(page_title="MITM Detection", layout="centered")
 
 st.title("🔐 MITM Attack Detection System")
 
+# -------------------------------
+# LOAD MODEL
+# -------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-model = pickle.load(open("model.pkl", "rb"))
-scaler = pickle.load(open("scaler.pkl", "rb"))
+model = pickle.load(open(os.path.join(BASE_DIR, "model.pkl"), "rb"))
+scaler = pickle.load(open(os.path.join(BASE_DIR, "scaler.pkl"), "rb"))
 
-@st.cache_resource
-def load_explainer(_model):
-    return shap.TreeExplainer(_model)
-
-explainer = load_explainer(model)
-
-
-if "safe" not in st.session_state:
-    st.session_state.safe = 0
-if "attack" not in st.session_state:
-    st.session_state.attack = 0
-
-
+# -------------------------------
+# INPUT
+# -------------------------------
 st.subheader("🧪 Enter Packet Details")
 
-col1, col2 = st.columns(2)
+packet_size = st.number_input("Packet Size", value=100)
+src_port = st.number_input("Source Port", value=50000)
+dst_port = st.number_input("Destination Port", value=5000)
+protocol = st.selectbox("Protocol", [6])
+tcp_len = st.number_input("TCP Length", value=20)
+tcp_window = st.number_input("TCP Window Size", value=64240)
+time_delta = st.number_input("Time Delta", value=0.001)
 
-with col1:
-    packet_size = st.number_input("Packet Size", min_value=1, value=100)
-    src_port = st.number_input("Source Port", min_value=1, value=50000)
-
-with col2:
-    dst_port = st.number_input("Destination Port (Server Port)", min_value=1, value=5000)
-    protocol = st.selectbox("Protocol", [6], format_func=lambda x: "TCP (6)")
-
-
-if st.button("Analyze Traffic"):
+# -------------------------------
+# PREDICTION
+# -------------------------------
+if st.button("Analyze"):
 
     data = pd.DataFrame(
-        [[packet_size, src_port, dst_port, protocol]],
-        columns=['packet_size','src_port','dst_port','protocol']
+        [[packet_size, src_port, dst_port, protocol, tcp_len, tcp_window, time_delta]],
+        columns=[
+            "packet_size","src_port","dst_port","protocol",
+            "tcp_len","tcp_window","time_delta"
+        ]
     )
 
-    
     data_scaled = scaler.transform(data)
+    prob = model.predict_proba(data_scaled)[0][1]
 
-    
-    prediction = model.predict(data_scaled)[0]
-
-    
-    if prediction == 1:
-        st.session_state.attack += 1
-        st.error("🚨 Suspicious Traffic Detected")
+    if prob > 0.7:
+        st.error(f"🚨 High Risk ({prob:.2f})")
+    elif prob > 0.4:
+        st.warning(f"⚠️ Suspicious ({prob:.2f})")
     else:
-        st.session_state.safe += 1
-        st.success("✅ Normal Traffic")
+        st.success(f"✅ Normal ({prob:.2f})")
 
-    
-    st.subheader("🔬 Explanation (Why this decision?)")
+# -------------------------------
+# ROC CURVE
+# -------------------------------
+st.subheader("📈 Model Performance")
 
-    shap_values = explainer.shap_values(data_scaled)
+try:
+    data = pd.read_csv(os.path.join(BASE_DIR, "final_dataset.csv"))
 
-    if isinstance(shap_values, list):
-        shap_vals = shap_values[1][0]
-    else:
-        shap_vals = shap_values[0]
+    data.columns = [
+        "packet_size","src_port","dst_port","protocol",
+        "tcp_len","tcp_window","time_delta","label"
+    ]
 
-    features = ['packet_size','src_port','dst_port','protocol']
+    # CLEAN DATA
+    data = data.replace(r"[^\d\.]", "", regex=True)
+    data = data.apply(pd.to_numeric, errors='coerce')
+    data = data.dropna()
 
-    explanation = pd.DataFrame({
-        "Feature": features,
-        "Impact": shap_vals
-    }).sort_values(by="Impact", key=abs, ascending=False)
+    X = data[[
+        "packet_size","src_port","dst_port","protocol",
+        "tcp_len","tcp_window","time_delta"
+    ]]
 
-    
-    st.dataframe(explanation, width='stretch')
+    y = data["label"]
 
-    
+    X_scaled = scaler.transform(X)
+    y_prob = model.predict_proba(X_scaled)[:,1]
+
+    fpr, tpr, _ = roc_curve(y, y_prob)
+    roc_auc = auc(fpr, tpr)
+
     fig, ax = plt.subplots()
-    ax.barh(explanation["Feature"], explanation["Impact"])
-    ax.set_title("Feature Impact on Decision")
-    ax.invert_yaxis()
+    ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.2f}")
+    ax.plot([0,1],[0,1],'--')
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve")
+    ax.legend()
 
     st.pyplot(fig)
 
-    st.caption("Positive → Attack | Negative → Safe")
-
-st.subheader("📊 Traffic Summary")
-
-safe = st.session_state.safe
-attack = st.session_state.attack
-
-fig, ax = plt.subplots()
-ax.bar(['Normal', 'Attack'], [safe, attack])
-ax.set_title("Traffic Classification")
-
-st.pyplot(fig)
-
-st.write(f"✅ Normal: {safe}")
-st.write(f"🚨 Suspicious: {attack}")
-
-
-st.subheader("📊 Model Insight")
-
-if st.button("Show Feature Importance"):
-
-    features = ['packet_size','src_port','dst_port','protocol']
-    importance = model.feature_importances_
-
-    fig, ax = plt.subplots()
-    ax.barh(features, importance)
-    ax.set_title("Feature Importance")
-
-    st.pyplot(fig)
-
-
-if st.button("Reset"):
-    st.session_state.safe = 0
-    st.session_state.attack = 0
+except Exception as e:
+    st.error(f"ROC Error: {e}")
